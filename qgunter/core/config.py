@@ -13,6 +13,7 @@ class QGunterConfig(BaseSettings):
     Pydantic Settings lee automáticamente variables de entorno y ficheros .env.
     Por ejemplo, si en .env pones LLM_MODEL=claude-opus-4-20250514,
     se cargará automáticamente.
+    
     """
 
     model_config = SettingsConfigDict(
@@ -24,7 +25,7 @@ class QGunterConfig(BaseSettings):
 
     # === LLM ===
     llm_model: str = Field(
-        default="claude-sonnet-4-5-20250929",
+        default="claude-haiku-4-5-20251001",
         description="Claude model to use",
     )
 
