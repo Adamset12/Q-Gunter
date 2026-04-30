@@ -1,11 +1,8 @@
-"""Controlador del agente con gestión de ciclo de vida.
+"""Controlador del agente — modo distribuido.
 
-Este es el CORAZÓN del sistema. Gestiona:
-- Estados: IDLE → RUNNING → PAUSED/COMPLETED/ERROR
-- Pausa/reanudación del agente
-- Inyección de instrucciones
-- Detección de banderas
-- Persistencia de sesiones
+CAMBIOS RESPECTO AL ORIGINAL:
+- En run(): instancia MCPRemoteBackend en lugar de ClaudeCodeBackend
+- El resto de la lógica (estados, pausa, flags, sesiones) es idéntica
 """
 
 import asyncio
@@ -13,7 +10,7 @@ import re
 from enum import Enum
 from typing import Any, ClassVar
 
-from qgunter.core.backend import AgentBackend, AgentMessage, ClaudeCodeBackend, MessageType
+from qgunter.core.backend import AgentBackend, AgentMessage, MCPRemoteBackend, MessageType
 from qgunter.core.config import QGunterConfig
 from qgunter.core.events import Event, EventBus, EventType
 from qgunter.core.session import SessionStatus, SessionStore
@@ -28,9 +25,6 @@ class AgentState(Enum):
 
 
 class AgentController:
-    """Orquestador central del agente."""
-
-    # Patrones regex para detectar banderas en el texto
     FLAG_PATTERNS: ClassVar[list[str]] = [
         r"flag\{[^\}]+\}",
         r"FLAG\{[^\}]+\}",
@@ -46,7 +40,7 @@ class AgentController:
         backend: AgentBackend | None = None,
         session_store: SessionStore | None = None,
         events: EventBus | None = None,
-    ):
+    ) -> None:
         self.config = config
         self.backend = backend
         self.sessions = session_store or SessionStore()
@@ -68,8 +62,6 @@ class AgentController:
     def _set_state(self, state: AgentState, details: str = "") -> None:
         self._state = state
         self.events.emit_state(state.value, details)
-
-    # === Control (llamado desde la interfaz) ===
 
     def pause(self) -> bool:
         if self._state == AgentState.RUNNING:
@@ -112,15 +104,11 @@ class AgentController:
         if text:
             self.inject(text)
 
-    # === Ejecución principal ===
-
     async def run(self, task: str, resume_session_id: str | None = None) -> dict[str, Any]:
-        """Ejecuta el agente con gestión completa del ciclo de vida."""
         self._pause_requested = False
         self._stop_requested = False
         self._resume_event.clear()
 
-        # Crear o reanudar sesión
         if resume_session_id:
             session = self.sessions.load(resume_session_id)
             if not session:
@@ -129,17 +117,24 @@ class AgentController:
                 task = session.task
         else:
             session = self.sessions.create(
-                target=self.config.target, task=task, model=self.config.llm_model,
+                target=self.config.target,
+                task=task,
+                model=self.config.llm_model,
             )
 
-        # Crear backend si no existe
+        # ── CAMBIO PRINCIPAL ──────────────────────────────────────────────────
+        # Antes: ClaudeCodeBackend (ejecuta herramientas localmente)
+        # Ahora: MCPRemoteBackend  (redirige herramientas a Manos via HTTP/MCP)
         if self.backend is None:
             from qgunter.prompts.pentesting import get_system_prompt
-            self.backend = ClaudeCodeBackend(
+            self.backend = MCPRemoteBackend(
                 working_directory=str(self.config.working_directory),
                 system_prompt=get_system_prompt(self.config.custom_instruction),
                 model=self.config.llm_model,
+                manos_url=self.config.manos_url,
+                manos_token=self.config.manos_token,
             )
+        # ─────────────────────────────────────────────────────────────────────
 
         try:
             self._set_state(AgentState.RUNNING, "Connecting...")
@@ -157,7 +152,6 @@ class AgentController:
             await self.backend.query(task)
             self.sessions.update_status(SessionStatus.RUNNING)
 
-            # Bucle principal de mensajes
             output_parts: list[str] = []
             flags_found: list[str] = []
 
@@ -207,7 +201,10 @@ class AgentController:
                 await self.backend.disconnect()
 
     async def _process_message(
-        self, msg: AgentMessage, output_parts: list[str], flags_found: list[str],
+        self,
+        msg: AgentMessage,
+        output_parts: list[str],
+        flags_found: list[str],
     ) -> None:
         if msg.type == MessageType.TEXT:
             output_parts.append(msg.content)
@@ -219,10 +216,18 @@ class AgentController:
                     self.events.emit_flag(flag, msg.content[:200])
 
         elif msg.type == MessageType.TOOL_START:
-            self.events.emit_tool(status="start", name=msg.tool_name or "unknown", args=msg.tool_args)
+            self.events.emit_tool(
+                status="start",
+                name=msg.tool_name or "unknown",
+                args=msg.tool_args,
+            )
 
         elif msg.type == MessageType.TOOL_RESULT:
-            self.events.emit_tool(status="complete", name=msg.tool_name or "unknown", result=msg.content)
+            self.events.emit_tool(
+                status="complete",
+                name=msg.tool_name or "unknown",
+                result=msg.content,
+            )
 
         elif msg.type == MessageType.RESULT:
             cost = msg.metadata.get("cost_usd", 0)

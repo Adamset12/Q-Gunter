@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "manos": {
+      "url": "http://192.168.0.185:7331/sse",
+      "headers": {
+        "Authorization": "Bearer 12345678910"
+      }
+    }
+  }
+}

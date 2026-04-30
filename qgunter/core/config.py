@@ -1,4 +1,4 @@
-"""Configuration management for Q-Gunter using Pydantic."""
+"""Configuration management for Q-Gunter — modo distribuido."""
 
 from pathlib import Path
 from typing import Any
@@ -8,12 +8,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class QGunterConfig(BaseSettings):
-    """Main configuration for Q-Gunter.
+    """Configuración principal de Q-Gunter.
 
-    Pydantic Settings lee automáticamente variables de entorno y ficheros .env.
-    Por ejemplo, si en .env pones LLM_MODEL=claude-opus-4-20250514,
-    se cargará automáticamente.
-    
+    Lee automáticamente desde .env y variables de entorno.
     """
 
     model_config = SettingsConfigDict(
@@ -39,7 +36,7 @@ class QGunterConfig(BaseSettings):
 
     # === Objetivo ===
     target: str = Field(
-        ...,  # "..." significa OBLIGATORIO, no tiene valor por defecto
+        ...,
         description="Target for penetration testing (URL, IP, domain)",
     )
 
@@ -48,16 +45,29 @@ class QGunterConfig(BaseSettings):
         description="Optional custom instructions for the agent",
     )
 
-    # === Permisos ===
-    permission_mode: str = Field(
-        default="bypassPermissions",
-        description="Permission mode for Claude Code SDK",
+    # === Manos: MCP Server remoto ===
+    # ELIMINADO: permission_mode (ya no se usa ClaudeCodeBackend local)
+    manos_host: str = Field(
+        default="192.168.1.100",
+        description="IP de la máquina Manos en la LAN",
+    )
+    manos_port: int = Field(
+        default=7331,
+        description="Puerto HTTP del MCP Server en Manos",
+    )
+    manos_token: str = Field(
+        default="CAMBIA_ESTE_TOKEN",
+        description="Token de autenticación compartido con Manos",
     )
 
     verbose: bool = Field(default=True)
 
+    @property
+    def manos_url(self) -> str:
+        """URL base del MCP Server de Manos."""
+        return f"http://{self.manos_host}:{self.manos_port}"
+
     def __init__(self, **data: Any) -> None:
-        """Inicializa y crea el directorio de trabajo si no existe."""
         super().__init__(**data)
         try:
             self.working_directory.mkdir(parents=True, exist_ok=True)
@@ -67,9 +77,5 @@ class QGunterConfig(BaseSettings):
 
 
 def load_config(**overrides: object) -> QGunterConfig:
-    """Carga configuración desde .env + variables de entorno + overrides.
-
-    Ejemplo:
-        config = load_config(target="10.10.11.234", verbose=True)
-    """
+    """Carga configuración desde .env + entorno + overrides."""
     return QGunterConfig(**overrides)

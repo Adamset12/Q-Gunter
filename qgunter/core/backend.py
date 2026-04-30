@@ -1,8 +1,4 @@
-"""Backend abstracto + implementación para Claude Code Subscription.
-
-La clase abstracta AgentBackend define QUÉ métodos debe tener cualquier backend.
-ClaudeCodeBackend es la implementación concreta para Claude Code CLI.
-"""
+"""Backend abstracto + implementación para Claude Code con MCP remoto."""
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
@@ -12,7 +8,6 @@ from typing import Any
 
 
 class MessageType(Enum):
-    """Tipos de mensaje que el backend puede producir."""
     TEXT = "text"
     TOOL_START = "tool_start"
     TOOL_RESULT = "tool_result"
@@ -22,7 +17,6 @@ class MessageType(Enum):
 
 @dataclass
 class AgentMessage:
-    """Mensaje genérico del backend (independiente del framework)."""
     type: MessageType
     content: Any
     tool_name: str | None = None
@@ -31,8 +25,6 @@ class AgentMessage:
 
 
 class AgentBackend(ABC):
-    """Interfaz abstracta. Cualquier backend (Claude, OpenAI, etc.) debe implementarla."""
-
     @abstractmethod
     async def connect(self) -> None: ...
 
@@ -57,33 +49,58 @@ class AgentBackend(ABC):
     async def resume(self, session_id: str) -> bool: ...
 
 
-class ClaudeCodeBackend(AgentBackend):
-    """Implementación para Claude Code Subscription (claude login)."""
+class MCPRemoteBackend(AgentBackend):
+    """
+    Backend para Claude Code SDK con herramientas MCP redirigidas a Manos.
 
-    def __init__(self, working_directory: str, system_prompt: str, model: str,
-                 permission_mode: str = "bypassPermissions"):
+    Claude Code se ejecuta en Cerebro (con claude login) pero todas las
+    herramientas (bash, read_file, write_file) se ejecutan en Manos
+    a través del MCP Server HTTP/SSE que corre allí.
+    """
+
+    def __init__(
+        self,
+        working_directory: str,
+        system_prompt: str,
+        model: str,
+        manos_url: str,
+        manos_token: str,
+        permission_mode: str = "bypassPermissions",
+    ) -> None:
         self._cwd = working_directory
         self._system_prompt = system_prompt
         self._model = model
+        self._manos_url = manos_url
+        self._manos_token = manos_token
         self._permission_mode = permission_mode
         self._client: Any = None
         self._session_id: str | None = None
 
+    def _mcp_servers(self) -> dict[str, Any]:
+        return {
+            "manos": {
+                "type": "sse",
+                "url": f"{self._manos_url}/sse",
+                "headers": {
+                    "Authorization": f"Bearer {self._manos_token}",
+                },
+            }
+        }
+
     async def connect(self) -> None:
-        """Conecta con Claude Code CLI usando el token OAuth de 'claude login'."""
         import os
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
         env_overrides: dict[str, str] = {}
-        # Limpiar API key para que use OAuth (el token de claude login)
         if os.environ.get("ANTHROPIC_API_KEY"):
             env_overrides["ANTHROPIC_API_KEY"] = ""
 
         options = ClaudeAgentOptions(
             cwd=self._cwd,
-            permission_mode=self._permission_mode,  # type: ignore[arg-type]
+            permission_mode=self._permission_mode,
             system_prompt=self._system_prompt,
             model=self._model,
+            mcp_servers=self._mcp_servers(),
             env=env_overrides,
         )
         self._client = ClaudeSDKClient(options=options)
@@ -100,17 +117,16 @@ class ClaudeCodeBackend(AgentBackend):
 
     async def query(self, prompt: str) -> None:
         if not self._client:
-            raise RuntimeError("Backend not connected")
+            raise RuntimeError("Backend no conectado")
         result = self._client.query(prompt)
         if result is not None:
             await result
 
     async def receive_messages(self) -> AsyncIterator[AgentMessage]:
-        """Convierte mensajes del SDK de Claude a nuestro formato genérico."""
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
 
         if not self._client:
-            raise RuntimeError("Backend not connected")
+            raise RuntimeError("Backend no conectado")
 
         async for msg in self._client.receive_response():
             if isinstance(msg, AssistantMessage):
@@ -119,12 +135,15 @@ class ClaudeCodeBackend(AgentBackend):
                         yield AgentMessage(type=MessageType.TEXT, content=block.text)
                     elif isinstance(block, ToolUseBlock):
                         yield AgentMessage(
-                            type=MessageType.TOOL_START, content=None,
-                            tool_name=block.name, tool_args=block.input,
+                            type=MessageType.TOOL_START,
+                            content=None,
+                            tool_name=block.name,
+                            tool_args=block.input,
                         )
             elif isinstance(msg, ResultMessage):
                 yield AgentMessage(
-                    type=MessageType.RESULT, content=None,
+                    type=MessageType.RESULT,
+                    content=None,
                     metadata={"cost_usd": getattr(msg, "total_cost_usd", 0)},
                 )
 
@@ -137,7 +156,6 @@ class ClaudeCodeBackend(AgentBackend):
         return True
 
     async def resume(self, session_id: str) -> bool:
-        """Reanuda una sesión anterior de Claude Code."""
         import os
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
@@ -152,9 +170,10 @@ class ClaudeCodeBackend(AgentBackend):
 
         options = ClaudeAgentOptions(
             cwd=self._cwd,
-            permission_mode=self._permission_mode,  # type: ignore[arg-type]
+            permission_mode=self._permission_mode,
             system_prompt=self._system_prompt,
             model=self._model,
+            mcp_servers=self._mcp_servers(),
             resume=session_id,
             env=env_overrides,
         )
